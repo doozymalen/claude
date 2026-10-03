@@ -1,0 +1,12 @@
+[project]
+name = "stele-extractor"
+version = "1.0.0"
+description = "3D 스캔(POP 4 / Revo Scan)에서 비석의 음각·양각 글자를 추출하는 프로그램"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
