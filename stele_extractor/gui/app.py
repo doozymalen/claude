@@ -11,7 +11,7 @@ def selftest() -> int:
     import tempfile
     from pathlib import Path
 
-    from ..core import export, model3d, ocr, vector
+    from ..core import depth_edit, export, model3d, ocr, vector
     from ..core.pipeline import GeometryParams, ReliefParams, build_geometry, process_relief
     from ..core.scan import load_scan
     from ..core.synthetic import SyntheticOptions, make_synthetic_scan, save_scan_ply
@@ -20,7 +20,7 @@ def selftest() -> int:
     scan = make_synthetic_scan(SyntheticOptions(text="忠孝\n仁義"))
     save_scan_ply(scan, out / "s.ply")
     scan = load_scan(out / "s.ply")
-    _, hm = build_geometry(scan, GeometryParams())
+    proj, hm = build_geometry(scan, GeometryParams())
     r = process_relief(hm, ReliefParams())
     export.export_result(r, out, "t")
     outlines = vector.mask_to_outlines(r.mask, hm.pixel_mm)
@@ -29,6 +29,10 @@ def selftest() -> int:
     mesh = model3d.make_print_model(r.mask, hm.valid, hm.pixel_mm, model3d.PrintOptions(kind="letters"),
                                     r.residual, polys)
     res = ocr.run_offline(r.images["mask"], r.mask, "hanja", "horizontal", auto_rotate=True)
+    labels, n = depth_edit.label_letters(r.mask, hm.pixel_mm)
+    edited = depth_edit.apply_edit(r, labels, n, depth_edit.DepthEdit(enabled=True, global_scale=2.0),
+                                   ReliefParams())
+    model3d.save_scan_mesh(depth_edit.displace_scan(scan, proj, edited), out / "edited.ply")
     import anthropic  # noqa: F401 - AI 판독 구성요소가 들어 있는지 확인
     import numpy as np
     import pyvista as pv
@@ -37,7 +41,8 @@ def selftest() -> int:
 
     pv.PolyData(np.random.rand(10, 3)).delaunay_2d()
 
-    return f"selftest OK: {hm.shape}, watertight={mesh.is_watertight}, ocr={res.text!r}, out={out}"
+    return (f"selftest OK: {hm.shape}, watertight={mesh.is_watertight}, ocr={res.text!r}, "
+            f"letters={n}, out={out}")
 
 
 def _run_selftest() -> int:

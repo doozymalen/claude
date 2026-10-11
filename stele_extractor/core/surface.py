@@ -236,6 +236,7 @@ def project_cylinder(scan: ScanData, flip: bool = False, rotation_deg: float = 0
         info={
             "radius_mm": radius,
             "axis": axis.tolist(),
+            "center": center.tolist(),
             "convex": bool(convex),
             "oriented_by_normals": oriented,
         },

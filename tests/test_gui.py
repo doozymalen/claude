@@ -135,3 +135,79 @@ def test_synthetic_dialog_options(app):
     d.surface.setCurrentIndex(1)
     o = d.options()
     assert o.surface == "curved" and o.text
+
+
+def test_depth_edit_workflow(app, window, tmp_path, monkeypatch):
+    from stele_extractor.core import depth_edit as de
+
+    w = window
+    ply = tmp_path / "비석.ply"
+    save_scan_ply(make_synthetic_scan(SyntheticOptions()), ply)
+    w.load_scan_file(str(ply))
+    wait(app, w)
+    assert w.n_letters == 4
+    base_depth = de.letter_depth_mm(w.base_result, w.labels)
+
+    # 전체 배율
+    p = w.depth_panel
+    p.enabled.setChecked(True)
+    p.global_scale.setValue(2.0)
+    wait(app, w, 0.5)
+    assert w.result.delta is not None
+    assert de.letter_depth_mm(w.result, w.labels) == pytest.approx(2 * base_depth, rel=0.05)
+    assert "→" in p.global_info.text()
+
+    # 글자 고르기 (클릭) 후 그 글자만 뒤집기
+    p.pick_btn.setChecked(True)
+    a = de.letter_anchor(w.labels, 1)
+    w.image_view.clicked.emit(int(a[0]), int(a[1]), False)
+    assert w.selected == [1]
+    p.sel_scale.setValue(-1.0)
+    wait(app, w, 0.5)
+    assert de.letter_depth_mm(w.result, w.labels, [1]) < 0
+    assert de.letter_depth_mm(w.result, w.labels, [2]) == pytest.approx(
+        2 * de.letter_depth_mm(w.base_result, w.labels, [2]), rel=0.1)
+    # 사각형으로 전부 고르기
+    h, wd = w.labels.shape
+    w.image_view.rectPicked.emit(0, h, 0, wd, False)
+    assert w.selected == [1, 2, 3, 4]
+
+    # 다른 설정을 바꿔 다시 처리해도 글자별 설정과 고른 글자가 유지된다
+    w.params.denoise.setValue(0.12)
+    wait(app, w, 0.5)
+    assert len(w.selected) == 4
+    table = de.letter_scales(w.depth_edit, w.labels, w.n_letters, w.base_result.heightmap)
+    assert sorted(table[1:].tolist()).count(-1.0) == 1
+
+    # 깊이 바꾼 원본 3D 저장
+    out = tmp_path / "edited.ply"
+    from PySide6.QtWidgets import QFileDialog
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "")))
+    w._saved = lambda *a, **k: w._busy_off()
+    w.export_edited_scan()
+    wait(app, w)
+    assert out.exists() and not w.errors
+
+    # 프로젝트에 저장되고 다시 열면 그대로
+    proj_dir = tmp_path / "프로젝트" / "깊이"
+    monkeypatch.setattr(mw.NewProjectDialog, "exec", lambda self: 1)
+    monkeypatch.setattr(mw.NewProjectDialog, "folder", lambda self: proj_dir)
+    assert w.save_project()
+    w2 = mw.MainWindow()
+    w2.errors = []
+    w2._error = lambda t, m, d="": w2.errors.append((t, m, d))
+    w2.open_project(str(proj_dir / "project.json"))
+    wait(app, w2, 0.5)
+    assert w2.depth_panel.enabled.isChecked()
+    assert w2.depth_panel.global_scale.value() == pytest.approx(2.0)
+    assert len(w2.depth_edit.overrides) == 1
+    assert de.letter_depth_mm(w2.result, w2.labels) != pytest.approx(base_depth, rel=0.05)
+    assert not w2.errors
+    w2.dirty = False
+    w2.close()
+
+    # 끄면 원래대로
+    p.enabled.setChecked(False)
+    wait(app, w, 0.5)
+    assert w.result is w.base_result

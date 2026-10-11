@@ -42,11 +42,17 @@ class Viewer3D(QWidget):
             return f"3D 보기를 사용할 수 없습니다.\n(그래픽 드라이버를 확인하세요)\n\n{self._error}"
         return "3D 보기를 사용할 수 없습니다. 2D 결과 탭은 정상적으로 쓸 수 있습니다."
 
-    def show_scan(self, scan: ScanData):
+    def show_scan(self, scan: ScanData, reset_camera: bool = True, use_color: bool = True):
+        """스캔을 보여 준다.
+
+        reset_camera=False면 보던 시점을 그대로 둔다 (깊이 편집 미리보기).
+        use_color=False면 색 없이 음영만 보여 주어 굴곡(깊이)이 잘 보인다.
+        """
         if self.plotter is None:
             return
         import pyvista as pv
 
+        camera = None if reset_camera else self.plotter.camera_position
         self.plotter.clear()
         if scan.has_faces:
             faces = np.column_stack([np.full(len(scan.faces), 3), scan.faces]).ravel()
@@ -58,15 +64,22 @@ class Viewer3D(QWidget):
                 idx = np.random.default_rng(0).choice(len(pts), MAX_DISPLAY_POINTS, replace=False)
                 pts = pts[idx]
             mesh = pv.PolyData(pts)
-        if scan.colors is not None:
+        if scan.colors is not None and use_color:
             colors = scan.colors if scan.has_faces or idx is None else scan.colors[idx]
             mesh.point_data["RGB"] = colors
             self.plotter.add_mesh(mesh, scalars="RGB", rgb=True, point_size=2)
         else:
             self.plotter.add_mesh(mesh, color="#d8d2c4", smooth_shading=True, point_size=2)
         self.plotter.add_axes()
-        self.plotter.reset_camera()
+        if camera is None:
+            self.plotter.reset_camera()
+        else:
+            self.plotter.camera_position = camera
         self.plotter.render()
+
+    @property
+    def available(self) -> bool:
+        return self.plotter is not None
 
     def clear(self):
         if self.plotter is not None:

@@ -28,11 +28,13 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..core import export as exporter
+from ..core import depth_edit as de
 from ..core import model3d, ocr, vector
 from ..core.pipeline import IMAGE_NAMES, ReliefResult, build_geometry, params_to_dict, process_relief
 from ..core.project import Project, crop_to_pixels, load_project, pixels_to_crop, save_project
 from ..core.scan import SUPPORTED_EXTENSIONS, UNIT_SCALES, ScanData, guess_unit, load_scan
 from ..core.synthetic import make_synthetic_scan, save_scan_ply
+from .depth_panel import DepthPanel, describe
 from .dialogs import (
     ExportImagesDialog,
     Model3DDialog,
@@ -77,7 +79,12 @@ HELP_TEXT = """\
 <h3>5. 글자 판독</h3>
 <p>오른쪽 [글자 판독] 패널에서 오프라인 OCR(한자·영문 / 한글) 또는 AI 판독(Claude)을 실행합니다.
 AI 판독은 [설정]에서 API 키를 넣어야 합니다. 결과는 직접 고칠 수 있고 프로젝트에 저장됩니다.</p>
-<h3>6. 프로젝트</h3>
+<h3>6. 글자 깊이 편집</h3>
+<p>오른쪽 [깊이 편집] 패널에서 [깊이 편집 켜기]를 체크하고 [깊이 배율]을 움직이면 모든 글자의 깊이가 바뀝니다
+(×2 = 두 배 깊게, ×0 = 평평하게, 음수 = 음각↔양각 뒤집기).
+[2D 화면에서 글자 고르기]를 누르고 글자를 클릭(Ctrl+클릭으로 여러 개, 끌기로 범위)하면 고른 글자만 따로 조절합니다.
+바뀐 깊이는 3D 화면, 이미지, 3D 내보내기에 모두 적용되고 [깊이 바꾼 원본 3D 저장]으로 스캔 전체를 저장할 수 있습니다.</p>
+<h3>7. 프로젝트</h3>
 <p>[파일 → 프로젝트 저장]을 하면 비석별 폴더에 설정·자른 영역·비석 정보·판독 결과가 저장되어
 나중에 그대로 다시 열 수 있습니다.</p>
 """
@@ -96,7 +103,16 @@ class MainWindow(QMainWindow):
         self.proj = None
         self.hm_full = None
         self.hm = None
-        self.result: ReliefResult | None = None
+        self.result: ReliefResult | None = None  # 화면·내보내기에 쓰는 결과 (깊이 편집 적용)
+        self.base_result: ReliefResult | None = None  # 깊이 편집 전 결과
+        self.labels = None  # 글자 번호 지도
+        self.n_letters = 0
+        self._labels_merge = None
+        self.depth_edit = de.DepthEdit()
+        self.selected: list[int] = []  # 고른 글자 번호
+        self._selected_uv: list = []  # 다시 처리해도 고른 글자를 기억하기 위한 위치(mm)
+        self._edit_running = self._edit_pending = False
+        self._shown_edited_3d = False
         self.crop_mm: list | None = None
         self.project = Project()
         self.dirty = False
@@ -178,6 +194,17 @@ class MainWindow(QMainWindow):
         dock2.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, dock2)
         self.tabifyDockWidget(dock, dock2)
+
+        self.depth_panel = DepthPanel()
+        depth_scroll = QScrollArea()
+        depth_scroll.setWidgetResizable(True)
+        depth_scroll.setWidget(self.depth_panel)
+        dock3 = QDockWidget("깊이 편집", self)
+        dock3.setObjectName("dock_depth")
+        dock3.setWidget(depth_scroll)
+        dock3.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock3)
+        self.tabifyDockWidget(dock2, dock3)
         dock.raise_()
 
         # 상태 표시줄
@@ -203,9 +230,19 @@ class MainWindow(QMainWindow):
         self.ocr_panel.downloadKorean.connect(self.download_korean)
         self.ocr_panel.textEdited.connect(self._mark_dirty)
         self.ocr_panel.showBoxes.connect(self.show_ocr_boxes)
+        self.depth_panel.editChanged.connect(self._schedule_edit)
+        self.depth_panel.pickModeToggled.connect(self._on_pick_mode)
+        self.depth_panel.selectedScaleChanged.connect(self._on_selected_scale)
+        self.depth_panel.resetSelected.connect(lambda: self._on_selected_scale(None))
+        self.depth_panel.clearSelection.connect(lambda: self._set_selection([]))
+        self.depth_panel.exportEdited.connect(self.export_edited_scan)
+        self.depth_panel.view3dChanged.connect(self._schedule_edit)
+        self.image_view.clicked.connect(self._on_pick_click)
+        self.image_view.rectPicked.connect(self._on_pick_rect)
 
         self._geo_timer = QTimer(self, singleShot=True, interval=400, timeout=self.request_geometry)
         self._rel_timer = QTimer(self, singleShot=True, interval=150, timeout=self.request_relief)
+        self._edit_timer = QTimer(self, singleShot=True, interval=120, timeout=self.request_edit)
 
     def _build_actions(self):
         mb = self.menuBar()
@@ -333,6 +370,12 @@ class MainWindow(QMainWindow):
             self.viewer3d.show_scan(scan.scaled(UNIT_SCALES[self.params.unit_key()]))
             self.tabs.setCurrentIndex(1)
             self.result = None
+            self.base_result = None
+            self.labels = None
+            self.selected, self._selected_uv = [], []
+            self._shown_edited_3d = False
+            self.depth_edit = de.DepthEdit.from_dict(self.project.depth_edit)
+            self.depth_panel.set_edit(self.depth_edit)
             self._ocr_view = None
             self.ocr_panel.set_results(self.project.ocr_results)
             self.dirty = False
@@ -459,21 +502,29 @@ class MainWindow(QMainWindow):
             return
         self._rel_running = True
         hm, rp = self.hm, self.params.relief_params()
+        merge = self.depth_panel.edit().merge_mm
         self._busy_on("글자를 찾는 중…")
 
-        def done(result: ReliefResult):
+        def work():
+            result = process_relief(hm, rp)
+            labels, n = de.label_letters(result.mask, hm.pixel_mm, merge)
+            return result, labels, n
+
+        def done(res):
             self._rel_running = False
             self._busy_off("처리 완료")
             if self._rel_pending:
                 self._rel_pending = False
                 self.request_relief()
                 return
-            self.result = result
+            result, self.labels, self.n_letters = res
+            self._labels_merge = merge
+            self.base_result = result
             self.params.set_background_value(result.background_mm)
-            self._refresh_image_list()
-            st = result.stats()
-            self.stats_label.setText("   ".join(f"{k}: {v}" for k, v in st.items()))
-            self._update_enabled()
+            self._restore_selection()
+            self.depth_panel.show_merge_value(de.auto_merge_mm(result.mask, result.heightmap.pixel_mm)
+                                              if result.mask.any() else 3.0)
+            self.request_edit(immediate=True)
 
         def failed(msg, details):
             self._rel_running = False
@@ -481,7 +532,198 @@ class MainWindow(QMainWindow):
             self._busy_off("처리 실패")
             self._error("글자 찾기 실패", msg, details)
 
-        run_task(process_relief, hm, rp, on_done=done, on_failed=failed)
+        run_task(work, on_done=done, on_failed=failed)
+
+    # ------------------------------------------------------------------
+    # 깊이 편집
+    # ------------------------------------------------------------------
+    def _schedule_edit(self):
+        if self.base_result is not None:
+            self._mark_dirty()
+        self._edit_timer.start()
+
+    def _set_result(self, result: ReliefResult):
+        self.result = result
+        self._refresh_image_list()
+        st = result.stats()
+        self.stats_label.setText("   ".join(f"{k}: {v}" for k, v in st.items()))
+        self._update_depth_info()
+        self._update_enabled()
+
+    def request_edit(self, immediate: bool = False):
+        """깊이 편집을 (다시) 적용한다. 편집이 꺼져 있으면 원래 결과를 그대로 쓴다."""
+        base = self.base_result
+        if base is None:
+            return
+        edit = self.depth_panel.edit(self.depth_edit.overrides)
+        self.depth_edit = edit
+        show3d = self.viewer3d.available and self.scan is not None and self.depth_panel.live3d.isChecked()
+        use_color = not self.depth_panel.no_color.isChecked()
+        if not edit.enabled or edit.is_identity():
+            self._set_result(base)
+            if self._shown_edited_3d and self.scan is not None:
+                self.viewer3d.show_scan(self.scan, reset_camera=False)
+                self._shown_edited_3d = False
+            if not edit.enabled and self.depth_panel.pick_btn.isChecked():
+                self.depth_panel.pick_btn.setChecked(False)
+            return
+        if self._edit_running:
+            self._edit_pending = True
+            return
+        self._edit_running = True
+        labels, n = self.labels, self.n_letters
+        merge_changed = self._labels_merge != edit.merge_mm
+        rp = self.params.relief_params()
+        scan, proj = self.scan, self.proj
+
+        def work():
+            lab, cnt = labels, n
+            if merge_changed:
+                lab, cnt = de.label_letters(base.mask, base.heightmap.pixel_mm, edit.merge_mm)
+            edited = de.apply_edit(base, lab, cnt, edit, rp)
+            moved = de.displace_scan(scan, proj, edited) if show3d else None
+            return lab, cnt, edited, moved
+
+        def done(res):
+            self._edit_running = False
+            lab, cnt, edited, moved = res
+            if merge_changed:
+                self.labels, self.n_letters, self._labels_merge = lab, cnt, edit.merge_mm
+                self._restore_selection()
+            if self._edit_pending:
+                self._edit_pending = False
+                self.request_edit()
+                return
+            self._set_result(edited)
+            if moved is not None:
+                self.viewer3d.show_scan(moved, reset_camera=False, use_color=use_color)
+                self._shown_edited_3d = True
+
+        def failed(msg, details):
+            self._edit_running = False
+            self._edit_pending = False
+            self._error("깊이 편집 실패", msg, details)
+
+        run_task(work, on_done=done, on_failed=failed)
+
+    def _update_depth_info(self):
+        base = self.base_result
+        if base is None or self.labels is None or not self.n_letters:
+            self.depth_panel.set_global_info("찾은 글자가 없습니다.")
+            self.depth_panel.set_selection(0, None)
+            return
+        before = de.letter_depth_mm(base, self.labels)
+        after = de.letter_depth_mm(self.result, self.labels) if self.result is not None else before
+        self.depth_panel.set_global_info(
+            f"글자 {self.n_letters}개 · 원래 {describe(before, base.polarity)} → 지금 {describe(after, base.polarity)}"
+        )
+        if self.selected:
+            table = de.letter_scales(self.depth_edit, self.labels, self.n_letters, base.heightmap)
+            d0 = de.letter_depth_mm(base, self.labels, self.selected)
+            d1 = de.letter_depth_mm(self.result, self.labels, self.selected)
+            self.depth_panel.set_selection(len(self.selected), float(table[self.selected[0]]),
+                                           f"{describe(d0, base.polarity)} → {describe(d1, base.polarity)}")
+        else:
+            self.depth_panel.set_selection(0, None)
+
+    def _on_pick_mode(self, on: bool):
+        if on:
+            self.select_btn.setChecked(False)
+            self.tabs.setCurrentIndex(1)
+        self.image_view.set_pick_mode(on)
+
+    def _set_selection(self, ids: list[int]):
+        self.selected = sorted(set(int(i) for i in ids if i))
+        hm = self.base_result.heightmap if self.base_result else None
+        self._selected_uv = []
+        if hm is not None and self.labels is not None:
+            for lab in self.selected:
+                a = de.letter_anchor(self.labels, lab)
+                if a is not None:
+                    self._selected_uv.append(de.pixel_to_uv(hm, *a))
+        self._update_depth_info()
+        self._show_current_image()
+
+    def _restore_selection(self):
+        """다시 처리해서 글자 번호가 바뀌어도 고른 글자를 유지한다."""
+        if self.base_result is None or self.labels is None:
+            self.selected = []
+            return
+        hm = self.base_result.heightmap
+        ids = []
+        for u, v in self._selected_uv:
+            r, c = de.uv_to_pixel(hm, u, v)
+            lab = de.label_at(self.labels, r, c, max(1, int(1.0 / hm.pixel_mm)))
+            if lab:
+                ids.append(lab)
+        self.selected = sorted(set(ids))
+
+    def _on_pick_click(self, row, col, add):
+        if self.labels is None:
+            return
+        lab = de.label_at(self.labels, row, col, max(2, int(round(0.5 / self.base_result.heightmap.pixel_mm))))
+        if add:
+            ids = set(self.selected)
+            if lab:
+                ids ^= {lab}
+            self._set_selection(list(ids))
+        else:
+            self._set_selection([lab] if lab else [])
+
+    def _on_pick_rect(self, r0, r1, c0, c1, add):
+        if self.labels is None:
+            return
+        ids = de.labels_in_rect(self.labels, r0, r1, c0, c1)
+        self._set_selection(list(set(self.selected) | set(ids)) if add else ids)
+
+    def _on_selected_scale(self, scale):
+        if not self.selected or self.base_result is None:
+            return
+        edit = self.depth_panel.edit(self.depth_edit.overrides)
+        de.set_letter_scale(edit, self.labels, self.base_result.heightmap, self.selected, scale)
+        self.depth_edit = edit
+        self._schedule_edit()
+
+    def _selection_overlay(self, img: np.ndarray) -> np.ndarray:
+        """고른 글자를 주황색 테두리와 옅은 색으로 표시한다 (바뀐 모양이 가려지지 않게)."""
+        if not self.selected or self.labels is None or self.labels.shape != img.shape[:2]:
+            return img
+        import cv2
+
+        rgb = img if img.ndim == 3 else np.repeat(img[..., None], 3, axis=2)
+        rgb = rgb.astype(np.float32)
+        m = np.isin(self.labels, self.selected).astype(np.uint8)
+        t = max(1, min(img.shape[:2]) // 300)
+        k = np.ones((2 * t + 1, 2 * t + 1), np.uint8)
+        edge = (cv2.dilate(m, k) - cv2.erode(m, k)).astype(bool)
+        orange = np.array([255, 140, 0], np.float32)
+        fill = m.astype(bool) & ~edge
+        rgb[fill] = rgb[fill] * 0.8 + orange * 0.2
+        rgb[edge] = orange
+        return rgb.astype(np.uint8)
+
+    def export_edited_scan(self):
+        if self.result is None or self.scan is None or self.result.delta is None:
+            QMessageBox.information(self, "깊이 편집", "아직 바뀐 깊이가 없습니다. 배율을 조정해 보세요.")
+            return
+        default = str(Path(self._default_out_dir()) / f"{self._base_name()}_깊이수정.ply")
+        path, flt = QFileDialog.getSaveFileName(self, "깊이 바꾼 원본 3D 저장", default,
+                                                "PLY (색상 포함) (*.ply);;OBJ (*.obj);;STL (*.stl)")
+        if not path:
+            return
+        if Path(path).suffix.lower() not in (".ply", ".obj", ".stl"):
+            path += ".ply"
+        scan, proj, result = self.scan, self.proj, self.result
+
+        def work():
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            moved = de.displace_scan(scan, proj, result)
+            model3d.save_scan_mesh(moved, path)
+            return [path], f"정점 {moved.n_points:,}개"
+
+        self._busy_on("깊이 바꾼 3D를 저장하는 중…")
+        run_task(work, on_done=lambda r: self._saved(r[0], str(Path(path).parent), r[1]),
+                 on_failed=self._export_failed)
 
     def _refresh_image_list(self):
         current = self.image_combo.currentData() or "rubbing"
@@ -510,7 +752,10 @@ class MainWindow(QMainWindow):
         if self.result is None or key not in self.result.images:
             self.image_view.set_image(None)
             return
-        self.image_view.set_image(self.result.images[key])
+        img = self.result.images[key]
+        if key != "color":
+            img = self._selection_overlay(img)
+        self.image_view.set_image(img)
 
     def _on_region(self, r0, r1, c0, c1):
         if self.hm is None:
@@ -611,7 +856,9 @@ class MainWindow(QMainWindow):
             hm = result.heightmap
             folder.mkdir(parents=True, exist_ok=True)
             if mode == "cut":
-                part = model3d.cut_letters_from_scan(scan, proj, hm, result.mask, margin)
+                # 깊이를 바꿨으면 바뀐 표면에서 잘라낸다
+                part = model3d.cut_letters_from_scan(de.displace_scan(scan, proj, result), proj, hm,
+                                                     result.mask, margin)
                 path = folder / f"{name}_글자_원본표면.{cut_fmt}"
                 model3d.save_scan_mesh(part, path)
                 return [path], f"삼각형 {len(part.faces):,}개"
@@ -766,6 +1013,7 @@ class MainWindow(QMainWindow):
         p.relief = self.params.relief_params()
         p.crop_mm = self.crop_mm
         p.ocr_results = self.ocr_panel.results()
+        p.depth_edit = self.depth_panel.edit(self.depth_edit.overrides).to_dict()
 
     def save_project(self, save_as: bool = False) -> bool:
         if self.raw_scan is None:

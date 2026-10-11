@@ -22,7 +22,9 @@ def numpy_to_qimage(img: np.ndarray) -> QImage:
 class ImageView(QGraphicsView):
     """마우스 휠 = 확대/축소, 드래그 = 이동, 선택 모드에서 드래그 = 영역 선택."""
 
-    regionSelected = Signal(int, int, int, int)  # r0, r1, c0, c1 (픽셀)
+    regionSelected = Signal(int, int, int, int)  # r0, r1, c0, c1 (픽셀) - 영역 선택 모드
+    rectPicked = Signal(int, int, int, int, bool)  # 글자 고르기 모드에서 끌기 (r0, r1, c0, c1, Ctrl)
+    clicked = Signal(int, int, bool)  # 글자 고르기 모드에서 클릭 (row, col, Ctrl)
     mouseMoved = Signal(int, int)  # row, col (이미지 밖이면 -1)
 
     def __init__(self, parent=None):
@@ -46,8 +48,9 @@ class ImageView(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setBackgroundBrush(QColor(90, 90, 90))
         self.setMouseTracking(True)
-        self._select_mode = False
+        self._mode = None  # None(이동) / "crop"(영역 선택) / "pick"(글자 고르기)
         self._sel_start: QPointF | None = None
+        self._press_pos = None
         self._shape: tuple[int, int] | None = None
 
     # -- 이미지 -----------------------------------------------------------
@@ -73,19 +76,27 @@ class ImageView(QGraphicsView):
     def wheelEvent(self, event):
         self.zoom(1.25 if event.angleDelta().y() > 0 else 0.8)
 
-    # -- 영역 선택 ---------------------------------------------------------
+    # -- 영역 선택 / 글자 고르기 ---------------------------------------------
     def set_select_mode(self, on: bool):
-        self._select_mode = on
-        self.setDragMode(QGraphicsView.NoDrag if on else QGraphicsView.ScrollHandDrag)
-        self.viewport().setCursor(Qt.CrossCursor if on else Qt.OpenHandCursor)
-        if not on:
-            self._sel_item.hide()
+        self.set_mode("crop" if on else None)
+
+    def set_pick_mode(self, on: bool):
+        self.set_mode("pick" if on else None)
+
+    def set_mode(self, mode):
+        self._mode = mode
+        self.setDragMode(QGraphicsView.NoDrag if mode else QGraphicsView.ScrollHandDrag)
+        self.viewport().setCursor(
+            Qt.CrossCursor if mode == "crop" else Qt.PointingHandCursor if mode == "pick" else Qt.OpenHandCursor
+        )
+        self._sel_start = None
+        self._sel_item.hide()
 
     def mousePressEvent(self, event):
-        if self._select_mode and event.button() == Qt.LeftButton and self._shape:
-            self._sel_start = self.mapToScene(event.position().toPoint())
+        if self._mode and event.button() == Qt.LeftButton and self._shape:
+            self._press_pos = event.position().toPoint()
+            self._sel_start = self.mapToScene(self._press_pos)
             self._sel_item.setRect(QRectF(self._sel_start, self._sel_start))
-            self._sel_item.show()
             return
         super().mousePressEvent(event)
 
@@ -95,19 +106,27 @@ class ImageView(QGraphicsView):
             self.mouseMoved.emit(int(p.y()), int(p.x()))
         else:
             self.mouseMoved.emit(-1, -1)
-        if self._select_mode and self._sel_start is not None:
+        if self._mode and self._sel_start is not None:
             self._sel_item.setRect(QRectF(self._sel_start, p).normalized())
+            self._sel_item.show()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._select_mode and self._sel_start is not None and event.button() == Qt.LeftButton:
+        if self._mode and self._sel_start is not None and event.button() == Qt.LeftButton:
+            ctrl = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+            moved = (event.position().toPoint() - self._press_pos).manhattanLength() if self._press_pos else 0
             rect = self._sel_item.rect().intersected(self.scene().sceneRect())
+            start = self._sel_start
             self._sel_start = None
             self._sel_item.hide()
-            if rect.width() >= 3 and rect.height() >= 3:
-                self.regionSelected.emit(
-                    int(rect.top()), int(rect.bottom()), int(rect.left()), int(rect.right())
-                )
+            if self._mode == "pick" and moved < 5:
+                self.clicked.emit(int(start.y()), int(start.x()), ctrl)
+            elif rect.width() >= 3 and rect.height() >= 3:
+                box = (int(rect.top()), int(rect.bottom()), int(rect.left()), int(rect.right()))
+                if self._mode == "pick":
+                    self.rectPicked.emit(*box, ctrl)
+                else:
+                    self.regionSelected.emit(*box)
             return
         super().mouseReleaseEvent(event)

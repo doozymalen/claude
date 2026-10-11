@@ -59,6 +59,10 @@ class ReliefResult:
     threshold: float
     background_mm: float
     images: dict = field(default_factory=dict)
+    # residual = height_sign × (스캔 표면 바깥쪽 높이). 점군에서 앞뒤를 뒤집어 보여 줄 때 -1
+    height_sign: float = 1.0
+    # 깊이 편집으로 더한 높이 변화 (residual과 같은 방향, mm). 편집하지 않았으면 None
+    delta: np.ndarray | None = None
 
     def stats(self) -> dict:
         hm = self.heightmap
@@ -163,17 +167,7 @@ def process_relief(hm: HeightMap, rp: ReliefParams) -> ReliefResult:
         min_area_mm2=rp.min_area_mm2,
     )
 
-    images = {
-        "rubbing": relief.rubbing_image(height_res, valid, rp.contrast),
-        "hillshade": relief.hillshade_image(
-            height_res, valid, px, rp.light_azimuth, rp.light_altitude, rp.exaggeration
-        ),
-        "enhanced": relief.enhanced_image(signal, valid, rp.contrast),
-        "mask": relief.mask_image(mask, valid),
-        "depth": relief.depth_color_image(height_res, valid),
-    }
-    if hm.color is not None:
-        images["color"] = hm.color
+    images = render_images(hm, height_res, signal, mask, rp)
 
     return ReliefResult(
         heightmap=hm,
@@ -184,7 +178,36 @@ def process_relief(hm: HeightMap, rp: ReliefParams) -> ReliefResult:
         threshold=thr,
         background_mm=bg_mm,
         images=images,
+        height_sign=-1.0 if height_res is not residual else 1.0,
     )
+
+
+def render_images(
+    hm: HeightMap,
+    height_res: np.ndarray,
+    signal: np.ndarray,
+    mask: np.ndarray,
+    rp: ReliefParams,
+    ref_res: np.ndarray | None = None,
+    ref_signal: np.ndarray | None = None,
+) -> dict:
+    """결과 이미지들을 만든다.
+
+    ref_res / ref_signal을 주면 밝기 기준을 그 값(편집 전)에 맞춰, 깊이를 바꾼 만큼 이미지도 달라 보이게 한다.
+    """
+    valid = hm.valid
+    images = {
+        "rubbing": relief.rubbing_image(height_res, valid, rp.contrast, ref=ref_res),
+        "hillshade": relief.hillshade_image(
+            height_res, valid, hm.pixel_mm, rp.light_azimuth, rp.light_altitude, rp.exaggeration
+        ),
+        "enhanced": relief.enhanced_image(signal, valid, rp.contrast, ref=ref_signal),
+        "mask": relief.mask_image(mask, valid),
+        "depth": relief.depth_color_image(height_res, valid, ref=ref_res),
+    }
+    if hm.color is not None:
+        images["color"] = hm.color
+    return images
 
 
 def params_to_dict(gp: GeometryParams, rp: ReliefParams) -> dict:

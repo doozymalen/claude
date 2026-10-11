@@ -77,6 +77,16 @@ class ScanData:
         return float(np.median(d[:, 1]))
 
 
+def compute_vertex_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """면 법선을 모아 정점 법선을 만든다."""
+    v = vertices
+    fn = np.cross(v[faces[:, 1]] - v[faces[:, 0]], v[faces[:, 2]] - v[faces[:, 0]])
+    vn = np.zeros_like(v)
+    for k in range(3):
+        np.add.at(vn, faces[:, k], fn)
+    return vn / np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-12)
+
+
 def _vertex_colors_from_visual(mesh) -> np.ndarray | None:
     visual = getattr(mesh, "visual", None)
     if visual is None:

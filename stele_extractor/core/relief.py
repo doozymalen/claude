@@ -169,9 +169,13 @@ def _normalize(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return np.clip((x - lo) / (hi - lo), 0, 1)
 
 
-def rubbing_image(height_res: np.ndarray, valid: np.ndarray, contrast: float = 1.0) -> np.ndarray:
-    """탁본: 종이에 먹을 두드리면 높은 면은 검게, 파인 곳은 하얗게 남는다."""
-    r = height_res[valid]
+def rubbing_image(height_res: np.ndarray, valid: np.ndarray, contrast: float = 1.0,
+                  ref: np.ndarray | None = None) -> np.ndarray:
+    """탁본: 종이에 먹을 두드리면 높은 면은 검게, 파인 곳은 하얗게 남는다.
+
+    ref: 밝기 기준으로 쓸 높이 (없으면 height_res 자신).
+    """
+    r = (height_res if ref is None else ref)[valid]
     if r.size == 0:
         return np.full(height_res.shape, 255, np.uint8)
     med = float(np.median(r))
@@ -208,9 +212,9 @@ def hillshade_image(
     return img.astype(np.uint8)
 
 
-def depth_color_image(height_res: np.ndarray, valid: np.ndarray) -> np.ndarray:
+def depth_color_image(height_res: np.ndarray, valid: np.ndarray, ref: np.ndarray | None = None) -> np.ndarray:
     """잔차 깊이를 색으로 표시 (파랑=깊음, 빨강=높음). RGB."""
-    r = height_res[valid]
+    r = (height_res if ref is None else ref)[valid]
     if r.size == 0:
         return np.full(height_res.shape + (3,), INVALID_GRAY, np.uint8)
     lim = max(abs(np.percentile(r, 1)), abs(np.percentile(r, 99)), 1e-6)
@@ -220,9 +224,10 @@ def depth_color_image(height_res: np.ndarray, valid: np.ndarray) -> np.ndarray:
     return rgb
 
 
-def enhanced_image(signal: np.ndarray, valid: np.ndarray, contrast: float = 1.0) -> np.ndarray:
+def enhanced_image(signal: np.ndarray, valid: np.ndarray, contrast: float = 1.0,
+                   ref: np.ndarray | None = None) -> np.ndarray:
     """글자 강조: 흰 바탕에 글자가 진하게 (OCR·판독용 회색조)."""
-    s = signal[valid]
+    s = (signal if ref is None else ref)[valid]
     if s.size == 0:
         return np.full(signal.shape, 255, np.uint8)
     hi = float(np.percentile(s, 99.5)) / max(contrast, 0.05)

@@ -69,13 +69,19 @@ def cut_letters_from_scan(
 
 
 def save_scan_mesh(scan: ScanData, path: str | Path) -> Path:
+    """스캔(메쉬 또는 점군)을 PLY/OBJ/STL로 저장한다."""
     import trimesh
 
     colors = None
     if scan.colors is not None:
         colors = np.column_stack([scan.colors, np.full(len(scan.colors), 255, np.uint8)])
-    mesh = trimesh.Trimesh(scan.vertices, scan.faces, vertex_colors=colors, process=False)
-    mesh.export(str(path))
+    if scan.has_faces:
+        geom = trimesh.Trimesh(scan.vertices, scan.faces, vertex_colors=colors, process=False)
+    else:
+        if Path(path).suffix.lower() == ".stl":
+            raise ValueError("점군(면이 없는 스캔)은 STL로 저장할 수 없습니다. PLY를 고르세요.")
+        geom = trimesh.PointCloud(scan.vertices, colors=colors)
+    geom.export(str(path))
     return Path(path)
 
 

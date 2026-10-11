@@ -46,6 +46,7 @@ class Project:
     crop_mm: list | None = None  # [u_min, u_max, v_min, v_max] 펼친 면 기준 mm
     notes: ProjectNotes = field(default_factory=ProjectNotes)
     ocr_results: list = field(default_factory=list)  # OcrResult.to_dict() 목록
+    depth_edit: dict = field(default_factory=dict)  # DepthEdit.to_dict()
     created: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     modified: str = ""
 
@@ -69,6 +70,7 @@ class Project:
             "crop_mm": self.crop_mm,
             "notes": asdict(self.notes),
             "ocr_results": self.ocr_results,
+            "depth_edit": self.depth_edit,
             "created": self.created,
             "modified": self.modified,
         }
@@ -108,6 +110,7 @@ def load_project(path: str | Path) -> Project:
         crop_mm=data.get("crop_mm"),
         notes=ProjectNotes(**_filter_fields(ProjectNotes, data.get("notes"))),
         ocr_results=data.get("ocr_results", []),
+        depth_edit=data.get("depth_edit", {}),
         created=data.get("created", ""),
         modified=data.get("modified", ""),
     )

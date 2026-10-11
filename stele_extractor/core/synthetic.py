@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 
-from .scan import ScanData
+from .scan import ScanData, compute_vertex_normals
 
 FONT_CANDIDATES = [
     # Windows
@@ -192,7 +192,7 @@ def make_synthetic_scan(opts: SyntheticOptions | None = None) -> ScanData:
     rot = _rotation_matrix(*angles)
     vertices = vertices @ rot.T + rng.uniform(-200, 200, 3)
 
-    normals = _vertex_normals(vertices, faces)
+    normals = compute_vertex_normals(vertices, faces)
     used = np.zeros(len(vertices), bool)
     used[faces.ravel()] = True
     remap = -np.ones(len(vertices), np.int64)
@@ -214,15 +214,6 @@ def _rotation_matrix(ax, ay, az):
     ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
     rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
     return rz @ ry @ rx
-
-
-def _vertex_normals(v: np.ndarray, f: np.ndarray) -> np.ndarray:
-    fn = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
-    vn = np.zeros_like(v)
-    for k in range(3):
-        np.add.at(vn, f[:, k], fn)
-    norm = np.linalg.norm(vn, axis=1, keepdims=True)
-    return vn / np.maximum(norm, 1e-12)
 
 
 def save_scan_ply(scan: ScanData, path: str | Path) -> None:
